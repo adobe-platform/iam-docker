@@ -52,19 +52,19 @@ func (handler *httpHandler) serveFastHTTP(ctx *fasthttp.RequestCtx) {
 		"remoteAddr": addr,
 	})
 
+	if path + "/" == iamPath {
+		logger.Debug("Rewriting path with trailing slash")
+		path = path + "/"
+	}
+
 	if method == healthMethod && path == healthPath {
 		logger.Debug("Serving health check request")
 		handler.serveHealthRequest(ctx, logger)
 		return
 	} else if method == iamMethod {
 		idx := strings.LastIndex(path, iamPath)
-		idxSansSlash := strings.LastIndex(path + "/", iamPath)
 		if idx == (len(path) - len(iamPath)) {
 			logger.Debug("Serving list IAM credentials request")
-			handler.serveListCredentialsRequest(ctx, addr, logger)
-			return
-		} else if idxSansSlash == (len(path + "/") - len(iamPath)) {
-			logger.Debug("Serving list IAM credentials request (301)")
 			handler.serveListCredentialsRequest(ctx, addr, logger)
 			return
 		} else if idx >= 0 {
