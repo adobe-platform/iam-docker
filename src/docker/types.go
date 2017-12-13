@@ -16,6 +16,9 @@ type ContainerStore interface {
 	IAMRoles() []ComplexRole
 	IAMRoleForIP(ip string) (ComplexRole, error)
 	IAMRoleForID(ip string) (ComplexRole, error)
+	MSIIdentities() []string
+	MSIIdentityForID(ip string) (string, error)
+	MSIIdentityForIP(ip string) (string, error)
 	RemoveContainer(name string)
 	SyncRunningContainers() error
 }

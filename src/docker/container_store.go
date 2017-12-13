@@ -16,6 +16,8 @@ const (
 	retrySleepBase                   = time.Second
 	retrySleepMultiplier             = 2
 	maxRetries                       = 3
+	msiLabel                         = "com.swipely.iam-docker.msi-explicit-identity"
+	msiEnvironmentVariable           = "MSI_IDENTITY"
 )
 
 var (
@@ -51,6 +53,7 @@ func (store *containerStore) AddContainerByID(id string) error {
 		logger.WithFields(logrus.Fields{
 			"ip":   ip,
 			"role": config.iamRole,
+			"msi":  config.msiIdentity,
 		}).Debug("Adding new container")
 	}
 
@@ -71,8 +74,10 @@ func (store *containerStore) IAMRoles() []ComplexRole {
 	iamSet := make(map[string]bool, len(store.configByContainerID))
 	externalId := make(map[string]string, len(store.configByContainerID))
 	for _, config := range store.configByContainerID {
-		iamSet[config.iamRole] = true
-		externalId[config.iamRole] = config.externalId
+		if config.iamRole != "" {
+			iamSet[config.iamRole] = true
+			externalId[config.iamRole] = config.externalId
+		}
 	}
 	store.mutex.RUnlock()
 
@@ -97,8 +102,8 @@ func (store *containerStore) IAMRoleForID(id string) (ComplexRole, error) {
 	defer store.mutex.RUnlock()
 
 	config, hasKey := store.configByContainerID[id]
-	if !hasKey {
-		return ComplexRole{}, fmt.Errorf("Unable to find config for container: %s", id)
+	if !hasKey || config.iamRole == "" {
+		return ComplexRole{}, fmt.Errorf("Unable to find IAM Role config for container: %s", id)
 	}
 
 	iamRole := ComplexRole{
@@ -120,8 +125,8 @@ func (store *containerStore) IAMRoleForIP(ip string) (ComplexRole, error) {
 	}
 
 	config, hasKey := store.configByContainerID[id]
-	if !hasKey {
-		return ComplexRole{}, fmt.Errorf("Unable to find config for container: %s", id)
+	if !hasKey || config.iamRole == "" {
+		return ComplexRole{}, fmt.Errorf("Unable to find IAM Role config for container: %s", id)
 	}
 
 	iamRole := ComplexRole{
@@ -129,6 +134,63 @@ func (store *containerStore) IAMRoleForIP(ip string) (ComplexRole, error) {
 		ExternalId: config.externalId,
 	}
 	return iamRole, nil
+}
+
+func (store *containerStore) MSIIdentities() []string {
+	log.Debug("Fetching unique MSI Identities in the store")
+
+	store.mutex.RLock()
+	msiSet := make(map[string]bool, len(store.configByContainerID))
+	for _, config := range store.configByContainerID {
+		if config.msiIdentity != "" {
+			msiSet[config.msiIdentity] = true
+		}
+	}
+	store.mutex.RUnlock()
+
+	msiIdentities := make([]string, len(msiSet))
+	count := 0
+	for msiIdentity := range msiSet {
+		msiIdentities[count] = msiIdentity
+		count++
+	}
+
+	return msiIdentities
+}
+
+func (store *containerStore) MSIIdentityForID(id string) (string, error) {
+	log.WithField("id", id).Debug("Looking up MSI Identity")
+
+	store.mutex.RLock()
+	defer store.mutex.RUnlock()
+
+	config, hasKey := store.configByContainerID[id]
+	if !hasKey || config.msiIdentity == "" {
+		return "", fmt.Errorf("Unable to find MSI config for container: %s", id)
+	}
+
+	msiIdentity := config.msiIdentity
+	return msiIdentity, nil
+}
+
+func (store *containerStore) MSIIdentityForIP(ip string) (string, error) {
+	log.WithField("ip", ip).Debug("Looking up MSI identity")
+
+	store.mutex.RLock()
+	defer store.mutex.RUnlock()
+
+	id, hasKey := store.containerIDsByIP[ip]
+	if !hasKey {
+		return "", fmt.Errorf("Unable to find container for IP: %s", ip)
+	}
+
+	config, hasKey := store.configByContainerID[id]
+	if !hasKey || config.msiIdentity == "" {
+		return "", fmt.Errorf("Unable to find MSI config for container: %s", id)
+	}
+
+	msiIdentity := config.msiIdentity
+	return msiIdentity, nil
 }
 
 func (store *containerStore) RemoveContainer(id string) {
@@ -171,6 +233,7 @@ func (store *containerStore) SyncRunningContainers() error {
 					"id":   config.id,
 					"ip":   ip,
 					"role": config.iamRole,
+					"msi":  config.msiIdentity,
 				}).Debug("Adding new container")
 				store.containerIDsByIP[ip] = config.id
 			}
@@ -196,17 +259,28 @@ func (store *containerStore) findConfigForID(id string) (*containerConfig, error
 	}
 
 	externalId, _ := container.Config.Labels[iamExternalIdLabel]
-	iamRole, hasLabel := container.Config.Labels[iamLabel]
-	if !hasLabel {
+	iamRole, hasIamLabel := container.Config.Labels[iamLabel]
+	if !hasIamLabel {
 		env := dockerClient.Env(container.Config.Env)
-		envRole := env.Get(iamEnvironmentVariable)
+		envIamRole := env.Get(iamEnvironmentVariable)
 		envExternalId := env.Get(iamExternalIdEnvironmentVariable)
-		if envRole != "" {
-			iamRole = envRole
+		if envIamRole != "" {
+			iamRole = envIamRole
 			externalId = envExternalId
-		} else {
-			return nil, fmt.Errorf("Unable to find label named '%s' or environment variable '%s' for container: %s", iamLabel, iamEnvironmentVariable, id)
 		}
+	}
+
+	msiIdentity, hasMsiLabel := container.Config.Labels[msiLabel]
+	if !hasMsiLabel {
+		env := dockerClient.Env(container.Config.Env)
+		envMsiIdentity := env.Get(msiEnvironmentVariable)
+		if envMsiIdentity != "" {
+			msiIdentity = envMsiIdentity
+		}
+	}
+
+	if iamRole == "" && msiIdentity == "" {
+		return nil, fmt.Errorf("Unable to find label named '%s' / '%s' or environment variable '%s' / '%s' for container: %s", iamLabel, msiLabel, iamEnvironmentVariable, msiEnvironmentVariable, id)
 	}
 
 	ips := make([]string, 0, 2)
@@ -222,10 +296,11 @@ func (store *containerStore) findConfigForID(id string) (*containerConfig, error
 	}
 
 	config := &containerConfig{
-		id:         id,
-		ips:        ips,
-		iamRole:    iamRole,
-		externalId: externalId,
+		id:          id,
+		ips:         ips,
+		iamRole:     iamRole,
+		externalId:  externalId,
+		msiIdentity: msiIdentity,
 	}
 
 	return config, nil
@@ -270,10 +345,11 @@ func withRetries(lambda func() error) error {
 }
 
 type containerConfig struct {
-	id         string
-	ips        []string
-	iamRole    string
-	externalId string
+	id          string
+	ips         []string
+	iamRole     string
+	externalId  string
+	msiIdentity string
 }
 
 type containerStore struct {
