@@ -7,8 +7,10 @@ import (
 	"github.com/swipely/iam-docker/src/docker"
 	"github.com/swipely/iam-docker/src/iam"
 	"github.com/valyala/fasthttp"
+	"github.com/swipely/iam-docker/src/msi"
 	adaptor "github.com/valyala/fasthttp/fasthttpadaptor"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -20,6 +22,8 @@ const (
 	iamPath        = "/meta-data/iam/security-credentials/"
 	healthMethod   = "GET"
 	healthPath     = "/healthcheck"
+	msiPath        = "/oauth2/token"
+	msiMethod      = "POST"
 )
 
 var (
@@ -45,7 +49,6 @@ func (handler *httpHandler) serveFastHTTP(ctx *fasthttp.RequestCtx) {
 	path := string(ctx.Path())
 	method := string(ctx.Method())
 	addr := ctx.RemoteAddr().String()
-
 	logger := log.WithFields(logrus.Fields{
 		"path":       path,
 		"method":     method,
@@ -56,7 +59,28 @@ func (handler *httpHandler) serveFastHTTP(ctx *fasthttp.RequestCtx) {
 		logger.Debug("Serving health check request")
 		handler.serveHealthRequest(ctx, logger)
 		return
-	} else if method == iamMethod {
+	} else if method == msiMethod && path == msiPath {
+ 		resourceBytes := ctx.FormValue("resource")
+ 		resource := string(resourceBytes[:])
+		if resource == "" {
+			postBody := ctx.PostBody()
+			parameterMap, err := url.ParseQuery(string(postBody[:]))
+			if err == nil {
+				resource = parameterMap.Get("resource")
+			} else {
+				logger.WithField("error", err.Error()).Warn("Unable to parse request body")
+				ctx.SetStatusCode(http.StatusBadRequest)
+				return
+			}
+		}
+		if resource == "" {
+			ctx.SetStatusCode(http.StatusBadRequest)
+			return
+		}
+		logger.Info("Serving MSI token request, resource: " + resource + ", ")
+		handler.serveMSIRequest(ctx, addr, resource, logger)
+		return
+    } else if method == iamMethod {
 		// Some SDKs request the security-credentials endpoint
 		// without the slash expecting a redirect
 		if strings.HasSuffix(path, "security-credentials") {
@@ -86,6 +110,24 @@ func (handler *httpHandler) serveFastHTTP(ctx *fasthttp.RequestCtx) {
 
 	logger.Debug("Delegating request upstream")
 	handler.upstreamHandler(ctx)
+}
+
+func (handler *httpHandler) serveMSIRequest(ctx *fasthttp.RequestCtx, addr string, resource string, logger *logrus.Entry) {
+	ip := strings.Split(addr, ":")[0]
+	msiIdentity, err := handler.containerStore.MSIIdentityForIP(ip)
+	if err != nil {
+		logger.WithField("error", err.Error()).Warn("Unable to find credentials")
+		ctx.SetStatusCode(http.StatusNotFound)
+		return
+	}
+	responseStringMsi, err := msi.GetToken(resource, msiIdentity) //TODO Should we cache MSI tokens as well (those are resource specific though)
+	if err != nil {
+		logger.WithField("error", err.Error()).Warn("Unable to get token")
+		ctx.SetStatusCode(http.StatusInternalServerError)
+		return
+	}
+	ctx.SetBodyString(responseStringMsi) // TODO Generate JSon and Marshal
+	logger.Debug("Successfully responded")
 }
 
 func (handler *httpHandler) serveIAMRequest(ctx *fasthttp.RequestCtx, addr string, path string, logger *logrus.Entry) {
