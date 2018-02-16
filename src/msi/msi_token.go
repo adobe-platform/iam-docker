@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	"os"
 )
 
 type tokenJson struct {
@@ -19,7 +20,8 @@ type tokenJson struct {
 }
 
 var (
-	log = logrus.WithField("prefix", "msi")
+	log            = logrus.WithField("prefix", "msi")
+	msiEndpointEnv = os.Getenv("MSI_ENDPOINT")
 )
 
 func GetToken(resource string, msiIdentity string) (string, error) {
@@ -31,8 +33,12 @@ func GetToken(resource string, msiIdentity string) (string, error) {
 
 	logger.Info("Got request for msi token")
 	// Create HTTP request for MSI token to access Azure Resource Manager
+	var msi_endpoint_url = msiEndpointEnv
+	if msi_endpoint_url == "" {
+		msi_endpoint_url = "http://localhost:50342/oauth2/token"
+	}
 	var msi_endpoint *url.URL
-	msi_endpoint, err := url.Parse("http://localhost:50342/oauth2/token")
+	msi_endpoint, err := url.Parse(msi_endpoint_url)
 	if err != nil {
 		logger.WithField("error", err.Error()).Warn("Error creating URL")
 		return "", err
