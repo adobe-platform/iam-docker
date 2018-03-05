@@ -20,8 +20,9 @@ type tokenJson struct {
 }
 
 var (
-	log            = logrus.WithField("prefix", "msi")
-	msiEndpointEnv = os.Getenv("MSI_ENDPOINT")
+	log              = logrus.WithField("prefix", "msi")
+	msiEndpointEnv   = os.Getenv("MSI_ENDPOINT")
+	msiApiVersionEnv = os.Getenv("MSI_API_VERSION")
 )
 
 func GetToken(resource string, msiIdentity string) (string, error) {
@@ -43,8 +44,13 @@ func GetToken(resource string, msiIdentity string) (string, error) {
 		logger.WithField("error", err.Error()).Warn("Error creating URL")
 		return "", err
 	}
+	var msi_api_version = msiApiVersionEnv
+	if msi_api_version == "" {
+		msi_api_version = "2018-02-01"
+	}
 	msi_parameters := url.Values{}
 	msi_parameters.Add("resource", resource)
+	msi_parameters.Add("api-version", msi_api_version)
 	msi_parameters.Add("client_id", msiIdentity)
 	msi_endpoint.RawQuery = msi_parameters.Encode()
 	req, err := http.NewRequest("GET", msi_endpoint.String(), nil)
