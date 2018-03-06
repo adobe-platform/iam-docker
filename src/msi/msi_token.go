@@ -7,6 +7,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
+	"sync"
+	"time"
+)
+
+const (
+	gracePeriod = time.Second * 30
 )
 
 type tokenJson struct {
@@ -23,6 +30,8 @@ var (
 	log              = logrus.WithField("prefix", "msi")
 	msiEndpointEnv   = os.Getenv("MSI_ENDPOINT")
 	msiApiVersionEnv = os.Getenv("MSI_API_VERSION")
+	tokenStore       = make(map[string]map[string]*tokenJson)
+	tokenMutex       = &sync.RWMutex{}
 )
 
 func GetToken(resource string, msiIdentity string) (string, error) {
@@ -32,7 +41,38 @@ func GetToken(resource string, msiIdentity string) (string, error) {
 		"msiIdentity": msiIdentity,
 	})
 
-	logger.Info("Got request for msi token")
+	var token *tokenJson
+	hasToken := false
+	//Look for the cached one
+	tokenMutex.RLock()
+	tokenMap, hasKey := tokenStore[msiIdentity]
+	if hasKey {
+		token, hasToken = tokenMap[resource]
+	}
+	tokenMutex.RUnlock()
+
+	// Return if cached one is still fresh
+	if hasToken {
+		expiresOnNumber, err := strconv.Atoi(token.ExpiresOn)
+		if err != nil {
+			logger.WithField("error", err.Error()).Warn("Error parsing the token expiry")
+			return "", err
+		}
+		expiresOn := time.Unix(int64(expiresOnNumber), 0)
+		if time.Now().Add(gracePeriod).Before(expiresOn) {
+			logger.Debug("token is fresh")
+			tokenBytes, err := json.Marshal(token)
+			if err != nil {
+				logger.WithField("error", err.Error()).Warn("Error marshaling the token json")
+				return "", err
+			}
+			return string(tokenBytes[:]), nil
+		}
+		logger.Info("token is stale, refreshing")
+	} else {
+		logger.Info("token is not in the cache, fetching")
+	}
+
 	// Create HTTP request for MSI token to access Azure Resource Manager
 	var msi_endpoint_url = msiEndpointEnv
 	if msi_endpoint_url == "" {
@@ -77,13 +117,23 @@ func GetToken(resource string, msiIdentity string) (string, error) {
 	}
 
 	// Unmarshall response body into struct
-	var token tokenJson
-	err = json.Unmarshal(responseBytes, &token)
+	token = &tokenJson{}
+	err = json.Unmarshal(responseBytes, token)
 	if err != nil {
 		logger.WithField("error", err.Error()).Warn("Error unmarshalling the response")
 		return "", err
 	}
 
-	responseString := string(responseBytes[:])
-	return responseString, nil
+	tokenMutex.Lock()
+	tokenMap, hasKey = tokenStore[msiIdentity]
+	if !hasKey {
+		tokenMap = make(map[string]*tokenJson)
+		tokenStore[msiIdentity] = tokenMap
+	}
+	tokenMap[resource] = token
+	tokenMutex.Unlock()
+
+	// For consistency sake, return the json to the extent present in our struct
+	tokenBytes, err := json.Marshal(token)
+	return string(tokenBytes[:]), nil
 }
