@@ -23,6 +23,7 @@ const (
 	healthMethod   = "GET"
 	healthPath     = "/healthcheck"
 	msiPath        = "/oauth2/token"
+	msiImdsPath    = "/metadata/identity/oauth2/token"
 )
 
 var (
@@ -58,7 +59,7 @@ func (handler *httpHandler) serveFastHTTP(ctx *fasthttp.RequestCtx) {
 		logger.Debug("Serving health check request")
 		handler.serveHealthRequest(ctx, logger)
 		return
-	} else if path == msiPath {
+	} else if path == msiPath || path == msiImdsPath {
 		resourceBytes := ctx.FormValue("resource")
 		resource := string(resourceBytes[:])
 		if resource == "" && method == "POST" {
