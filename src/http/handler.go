@@ -126,6 +126,7 @@ func (handler *httpHandler) serveMSIRequest(ctx *fasthttp.RequestCtx, addr strin
 		ctx.SetStatusCode(http.StatusInternalServerError)
 		return
 	}
+	ctx.SetContentType("application/json")
 	ctx.SetBodyString(responseStringMsi) // TODO Generate JSon and Marshal
 	logger.Debug("Successfully responded")
 }
