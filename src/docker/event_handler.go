@@ -5,6 +5,7 @@ import (
 	"github.com/Sirupsen/logrus"
 	dockerClient "github.com/fsouza/go-dockerclient"
 	iam "github.com/swipely/iam-docker/src/iam"
+	"github.com/swipely/iam-docker/src/msi"
 	"sync"
 )
 
@@ -53,6 +54,19 @@ func (handler *eventHandler) work(workerID int, channel <-chan *dockerClient.API
 				elog.WithField("error", err.Error()).Warn("Unable to add container")
 				continue
 			}
+
+			msiIdentity, err := handler.containerStore.MSIIdentityForID(event.ID)
+			if err != nil {
+				elog.WithField("error", err.Error()).Warn("Unable to lookup MSI identity")
+			} else {
+				rlog := elog.WithFields(logrus.Fields{"msiIdentity": msiIdentity})
+				rlog.Info("Fetching msi token")
+				_, err = msi.RefreshToken(msi.StorageResource, msiIdentity)
+				if err != nil {
+					rlog.WithField("error", err.Error()).Warn("Unable to fetch MSI token")
+				}
+			}
+
 			role, err := handler.containerStore.IAMRoleForID(event.ID)
 			if err != nil {
 				elog.WithField("error", err.Error()).Warn("Unable to lookup IAM role")

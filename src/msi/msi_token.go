@@ -3,6 +3,7 @@ package msi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/Sirupsen/logrus"
 	"io/ioutil"
 	"net/http"
@@ -14,7 +15,9 @@ import (
 )
 
 const (
-	gracePeriod = time.Second * 30
+	realTimeGracePeriod = time.Second * 30
+	refreshGracePeriod  = time.Minute * 30
+	StorageResource     = "https://storage.azure.com/"
 )
 
 type tokenJson struct {
@@ -57,18 +60,26 @@ func init() {
 }
 
 func GetToken(resource string, msiIdentity string) (string, error) {
+	return FetchToken(resource, msiIdentity, realTimeGracePeriod, false)
+}
+
+func RefreshToken(resource string, msiIdentity string) (string, error) {
+	return FetchToken(resource, msiIdentity, refreshGracePeriod, true)
+}
+
+func FetchToken(resource string, msiIdentity string, gracePeriod time.Duration, bypassCache bool) (string, error) {
 
 	logger := log.WithFields(logrus.Fields{
 		"resource":    resource,
 		"msiIdentity": msiIdentity,
 	})
 
-	responseString := GetTokenFromCache(resource, msiIdentity)
+	responseString := GetTokenFromCache(resource, msiIdentity, gracePeriod)
 	if responseString != "" {
 		return responseString, nil
 	}
 
-	httpStatusCode, responseBytes, err := InvokeTokenRequest(resource, msiIdentity)
+	httpStatusCode, responseBytes, err := InvokeTokenRequest(resource, msiIdentity, bypassCache)
 
 	if err != nil {
 		return "", err
@@ -78,7 +89,7 @@ func GetToken(resource string, msiIdentity string) (string, error) {
 	if httpStatusCode == 429 {
 		logger.WithField("response", string(responseBytes)).Info("Rate limit error from MSI endpoint.")
 		// Retry from cache once again
-		responseString = GetTokenFromCache(resource, msiIdentity)
+		responseString = GetTokenFromCache(resource, msiIdentity, gracePeriod)
 		if responseString != "" {
 			logger.Info("Got token from cache after rate limit error from MSI endpoint.")
 			return responseString, nil
@@ -86,13 +97,13 @@ func GetToken(resource string, msiIdentity string) (string, error) {
 		// Back-off
 		time.Sleep(time.Duration(int64(backOffInterval) * int64(time.Millisecond)))
 		// Retry from cache one last time
-		responseString = GetTokenFromCache(resource, msiIdentity)
+		responseString = GetTokenFromCache(resource, msiIdentity, gracePeriod)
 		if responseString != "" {
 			logger.Info("Got token from cache after backoff.")
 			return responseString, nil
 		}
 		logger.Info("Reinvoking MSI endpoint after backoff.")
-		httpStatusCode, responseBytes, err = InvokeTokenRequest(resource, msiIdentity)
+		httpStatusCode, responseBytes, err = InvokeTokenRequest(resource, msiIdentity, bypassCache)
 		if err != nil {
 			return "", err
 		}
@@ -125,7 +136,7 @@ func GetToken(resource string, msiIdentity string) (string, error) {
 	return string(tokenBytes[:]), nil
 }
 
-func InvokeTokenRequest(resource string, msiIdentity string) (int, []byte, error) {
+func InvokeTokenRequest(resource string, msiIdentity string, bypassCache bool) (int, []byte, error) {
 	logger := log.WithFields(logrus.Fields{
 		"resource":    resource,
 		"msiIdentity": msiIdentity,
@@ -139,6 +150,9 @@ func InvokeTokenRequest(resource string, msiIdentity string) (int, []byte, error
 	}
 	msi_parameters := url.Values{}
 	msi_parameters.Add("resource", resource)
+	if bypassCache {
+		msi_parameters.Add("bypass_cache", "true")
+	}
 	msi_parameters.Add("api-version", msi_api_version)
 	msi_parameters.Add("client_id", msiIdentity)
 	msi_endpoint.RawQuery = msi_parameters.Encode()
@@ -168,13 +182,14 @@ func InvokeTokenRequest(resource string, msiIdentity string) (int, []byte, error
 	return resp.StatusCode, responseBytes, nil
 }
 
-func GetTokenFromCache(resource string, msiIdentity string) string {
+func GetTokenFromCache(resource string, msiIdentity string, gracePeriod time.Duration) string {
 	logger := log.WithFields(logrus.Fields{
 		"resource":    resource,
 		"msiIdentity": msiIdentity,
 	})
 	var token *tokenJson
 	hasToken := false
+
 	//Look for the cached one
 	tokenMutex.RLock()
 	tokenMap, hasKey := tokenStore[msiIdentity]
@@ -193,7 +208,8 @@ func GetTokenFromCache(resource string, msiIdentity string) string {
 		}
 		expiresOn := time.Unix(int64(expiresOnNumber), 0)
 		if time.Now().Add(gracePeriod).Before(expiresOn) {
-			logger.Debug("Token is fresh.")
+			freshFor := expiresOn.Sub(time.Now().Add(gracePeriod))
+			logger.Debug("Token is fresh for: " + fmt.Sprintf("%f", freshFor.Seconds()) + " seconds")
 			tokenBytes, err := json.Marshal(token)
 			if err != nil {
 				logger.WithField("error", err.Error()).Warn("Error marshaling the token json.")
@@ -207,4 +223,32 @@ func GetTokenFromCache(resource string, msiIdentity string) string {
 		logger.Info("Token is not in the cache, fetching.")
 	}
 	return ""
+}
+
+func RefreshTokens() {
+	log.Info("Refreshing MSI Tokens, number of identities: " + strconv.Itoa(len(tokenStore)))
+	tokenMutex.RLock()
+	identities := make(map[string][]string, len(tokenStore))
+	for identity, tokenMap := range tokenStore {
+		identities[identity] = make([]string, len(tokenMap))
+		count := 0
+		for resource, _ := range tokenMap {
+			identities[identity][count] = resource
+			count++
+		}
+	}
+	tokenMutex.RUnlock()
+
+	for msiIdentity, resources := range identities {
+		for _, resource := range resources {
+			_, err := RefreshToken(resource, msiIdentity)
+			if err != nil {
+				log.WithFields(logrus.Fields{
+					"msiIdentity": msiIdentity,
+					"error":       err.Error(),
+				}).Warn("Unable to refresh token")
+			}
+		}
+	}
+	log.Info("Done refreshing MSI tokens")
 }
