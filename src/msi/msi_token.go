@@ -37,7 +37,7 @@ var (
 	msiApiVersionEnv      = os.Getenv("MSI_API_VERSION")
 	msi_api_version       = msiApiVersionEnv
 	msiBackoffIntervalEnv = os.Getenv("MSI_BACKOFF_INTERVAL_MILLI")
-	backOffInterval       = 2000
+	backOffInterval       = 5000
 	tokenStore            = make(map[string]map[string]*tokenJson)
 	tokenMutex            = &sync.RWMutex{}
 )
@@ -53,8 +53,8 @@ func init() {
 	if msiBackoffIntervalEnv != "" {
 		backOffInterval, err = strconv.Atoi(msiBackoffIntervalEnv)
 		if err != nil {
-			// default value 2 seconds
-			backOffInterval = 2000
+			// default value 5 seconds
+			backOffInterval = 5000
 		}
 	}
 }
