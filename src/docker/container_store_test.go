@@ -239,6 +239,7 @@ var _ = Describe("ContainerStore", func() {
 			It("Returns an error", func() {
 				actual, err := subject.IAMRoleForID(id)
 				Expect(actual.Arn).To(Equal(""))
+				Expect(actual.RequireMetadataHeader).To(BeFalse())
 				Expect(err).ToNot(BeNil())
 			})
 		})
@@ -266,6 +267,7 @@ var _ = Describe("ContainerStore", func() {
 			It("Returns the IAM role", func() {
 				actual, err := subject.IAMRoleForID(id)
 				Expect(actual.Arn).To(Equal(role))
+				Expect(actual.RequireMetadataHeader).To(BeFalse())
 				Expect(err).To(BeNil())
 			})
 		})
@@ -277,6 +279,7 @@ var _ = Describe("ContainerStore", func() {
 			ipOne = "172.0.0.99"
 			ipTwo = "173.0.0.98"
 			role  = "arn:aws:iam::012345678901:role/s3-rw"
+			rmh   = "TrUe"
 		)
 
 		Context("When the IP is not stored", func() {
@@ -293,8 +296,11 @@ var _ = Describe("ContainerStore", func() {
 		Context("When the IP is stored", func() {
 			BeforeEach(func() {
 				_ = client.AddContainer(&dockerClient.Container{
-					ID:     id,
-					Config: &dockerClient.Config{Labels: map[string]string{"com.swipely.iam-docker.iam-profile": role}},
+					ID: id,
+					Config: &dockerClient.Config{Labels: map[string]string{
+						"com.swipely.iam-docker.iam-profile":             role,
+						"com.swipely.iam-docker.require-metadata-header": rmh,
+					}},
 					NetworkSettings: &dockerClient.NetworkSettings{
 						Networks: map[string]dockerClient.ContainerNetwork{
 							"bridge": dockerClient.ContainerNetwork{
@@ -312,9 +318,11 @@ var _ = Describe("ContainerStore", func() {
 			It("Returns the IAM role", func() {
 				actual, err := subject.IAMRoleForIP(ipOne)
 				Expect(actual.Arn).To(Equal(role))
+				Expect(actual.RequireMetadataHeader).To(BeTrue())
 				Expect(err).To(BeNil())
 				actual, err = subject.IAMRoleForIP(ipTwo)
 				Expect(actual.Arn).To(Equal(role))
+				Expect(actual.RequireMetadataHeader).To(BeTrue())
 				Expect(err).To(BeNil())
 			})
 		})

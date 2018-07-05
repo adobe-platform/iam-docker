@@ -2,6 +2,12 @@ package http
 
 import (
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
 	"github.com/Sirupsen/logrus"
 	"github.com/aws/aws-sdk-go/service/sts"
 	"github.com/swipely/iam-docker/src/docker"
@@ -9,10 +15,6 @@ import (
 	"github.com/swipely/iam-docker/src/msi"
 	"github.com/valyala/fasthttp"
 	adaptor "github.com/valyala/fasthttp/fasthttpadaptor"
-	"net/http"
-	"net/url"
-	"strings"
-	"time"
 )
 
 const (
@@ -132,12 +134,13 @@ func (handler *httpHandler) serveMSIRequest(ctx *fasthttp.RequestCtx, addr strin
 }
 
 func (handler *httpHandler) serveIAMRequest(ctx *fasthttp.RequestCtx, addr string, path string, logger *logrus.Entry) {
-	role, creds, err := handler.credentialsForAddress(addr)
+	role, creds, err := handler.credentialsForRequest(ctx, addr, logger)
 	if err != nil {
 		logger.WithField("error", err.Error()).Warn("Unable to find credentials")
 		ctx.SetStatusCode(http.StatusNotFound)
 		return
 	}
+
 	idx := strings.LastIndex(path, "/")
 	requestedRole := path[idx+1:]
 	if !strings.HasSuffix(*role, requestedRole) {
@@ -167,7 +170,7 @@ func (handler *httpHandler) serveIAMRequest(ctx *fasthttp.RequestCtx, addr strin
 }
 
 func (handler *httpHandler) serveListCredentialsRequest(ctx *fasthttp.RequestCtx, addr string, logger *logrus.Entry) {
-	role, _, err := handler.credentialsForAddress(addr)
+	role, _, err := handler.credentialsForRequest(ctx, addr, logger)
 	if err != nil {
 		logger.WithField("error", err.Error()).Warn("Unable to find credentials")
 		ctx.SetStatusCode(http.StatusNotFound)
@@ -188,11 +191,18 @@ func (handler *httpHandler) serveHealthRequest(ctx *fasthttp.RequestCtx, logger 
 	logger.Debug("Successfully responded")
 }
 
-func (handler *httpHandler) credentialsForAddress(address string) (*string, *sts.Credentials, error) {
-	ip := strings.Split(address, ":")[0]
+func (handler *httpHandler) credentialsForRequest(ctx *fasthttp.RequestCtx, addr string, logger *logrus.Entry) (*string, *sts.Credentials, error) {
+	ip := strings.Split(addr, ":")[0]
 	role, err := handler.containerStore.IAMRoleForIP(ip)
 	if err != nil {
 		return nil, nil, err
+	}
+	if role.RequireMetadataHeader {
+		bytes := ctx.Request.Header.Peek("Metadata")
+		ok := len(bytes) == 4 && "true" == strings.ToLower(string(bytes))
+		if !ok {
+			return nil, nil, errors.New("Missing required Metadata Header")
+		}
 	}
 	creds, err := handler.credentialStore.CredentialsForRole(role.Arn, role.ExternalId)
 	if err != nil {
