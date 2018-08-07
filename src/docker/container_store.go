@@ -2,10 +2,12 @@ package docker
 
 import (
 	"fmt"
-	"github.com/Sirupsen/logrus"
-	dockerClient "github.com/fsouza/go-dockerclient"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/Sirupsen/logrus"
+	dockerClient "github.com/fsouza/go-dockerclient"
 )
 
 const (
@@ -18,6 +20,8 @@ const (
 	maxRetries                       = 3
 	msiLabel                         = "com.swipely.iam-docker.msi-explicit-identity"
 	msiEnvironmentVariable           = "MSI_IDENTITY"
+	requireMetadataHeaderLabel       = "com.swipely.iam-docker.require-metadata-header"
+	requireMetadataHeaderVariable    = "REQUIRE_METADATA_HEADER"
 )
 
 var (
@@ -28,8 +32,9 @@ var (
 )
 
 type ComplexRole struct {
-	Arn        string
-	ExternalId string
+	Arn                   string
+	ExternalId            string
+	RequireMetadataHeader bool
 }
 
 // NewContainerStore creates an empty container store.
@@ -71,24 +76,22 @@ func (store *containerStore) IAMRoles() []ComplexRole {
 	log.Debug("Fetching unique IAM Roles in the store")
 
 	store.mutex.RLock()
-	iamSet := make(map[string]bool, len(store.configByContainerID))
-	externalId := make(map[string]string, len(store.configByContainerID))
+	iamSet := make(map[string]ComplexRole, len(store.configByContainerID))
 	for _, config := range store.configByContainerID {
 		if config.iamRole != "" {
-			iamSet[config.iamRole] = true
-			externalId[config.iamRole] = config.externalId
+			iamSet[config.iamRole] = ComplexRole{
+				Arn:                   config.iamRole,
+				ExternalId:            config.externalId,
+				RequireMetadataHeader: config.requireMetadataHeader,
+			}
 		}
 	}
 	store.mutex.RUnlock()
 
 	iamRoles := make([]ComplexRole, len(iamSet))
 	count := 0
-	for role := range iamSet {
-		r := ComplexRole{
-			Arn:        role,
-			ExternalId: externalId[role],
-		}
-		iamRoles[count] = r
+	for _, role := range iamSet {
+		iamRoles[count] = role
 		count++
 	}
 
@@ -107,8 +110,9 @@ func (store *containerStore) IAMRoleForID(id string) (ComplexRole, error) {
 	}
 
 	iamRole := ComplexRole{
-		Arn:        config.iamRole,
-		ExternalId: config.externalId,
+		Arn:                   config.iamRole,
+		ExternalId:            config.externalId,
+		RequireMetadataHeader: config.requireMetadataHeader,
 	}
 	return iamRole, nil
 }
@@ -130,8 +134,9 @@ func (store *containerStore) IAMRoleForIP(ip string) (ComplexRole, error) {
 	}
 
 	iamRole := ComplexRole{
-		Arn:        config.iamRole,
-		ExternalId: config.externalId,
+		Arn:                   config.iamRole,
+		ExternalId:            config.externalId,
+		RequireMetadataHeader: config.requireMetadataHeader,
 	}
 	return iamRole, nil
 }
@@ -258,15 +263,22 @@ func (store *containerStore) findConfigForID(id string) (*containerConfig, error
 		return nil, fmt.Errorf("Container has no network settings: %s", id)
 	}
 
+	var requireMetadataHeader bool
+	if str, ok := container.Config.Labels[requireMetadataHeaderLabel]; ok {
+		requireMetadataHeader = isTrue(str)
+	}
+
 	externalId, _ := container.Config.Labels[iamExternalIdLabel]
 	iamRole, hasIamLabel := container.Config.Labels[iamLabel]
 	if !hasIamLabel {
 		env := dockerClient.Env(container.Config.Env)
 		envIamRole := env.Get(iamEnvironmentVariable)
 		envExternalId := env.Get(iamExternalIdEnvironmentVariable)
+		envRequireMetadataHeaderValue := env.Get(requireMetadataHeaderVariable)
 		if envIamRole != "" {
 			iamRole = envIamRole
 			externalId = envExternalId
+			requireMetadataHeader = isTrue(envRequireMetadataHeaderValue)
 		}
 	}
 
@@ -274,8 +286,10 @@ func (store *containerStore) findConfigForID(id string) (*containerConfig, error
 	if !hasMsiLabel {
 		env := dockerClient.Env(container.Config.Env)
 		envMsiIdentity := env.Get(msiEnvironmentVariable)
+		envRequireMetadataHeaderValue := env.Get(requireMetadataHeaderVariable)
 		if envMsiIdentity != "" {
 			msiIdentity = envMsiIdentity
+			requireMetadataHeader = isTrue(envRequireMetadataHeaderValue)
 		}
 	}
 
@@ -296,11 +310,12 @@ func (store *containerStore) findConfigForID(id string) (*containerConfig, error
 	}
 
 	config := &containerConfig{
-		id:          id,
-		ips:         ips,
-		iamRole:     iamRole,
-		externalId:  externalId,
-		msiIdentity: msiIdentity,
+		id:                    id,
+		ips:                   ips,
+		iamRole:               iamRole,
+		externalId:            externalId,
+		msiIdentity:           msiIdentity,
+		requireMetadataHeader: requireMetadataHeader,
 	}
 
 	return config, nil
@@ -344,12 +359,17 @@ func withRetries(lambda func() error) error {
 	return err
 }
 
+func isTrue(s string) bool {
+	return len(s) == 4 && strings.ToLower(s) == "true"
+}
+
 type containerConfig struct {
-	id          string
-	ips         []string
-	iamRole     string
-	externalId  string
-	msiIdentity string
+	id                    string
+	ips                   []string
+	iamRole               string
+	externalId            string
+	requireMetadataHeader bool
+	msiIdentity           string
 }
 
 type containerStore struct {
