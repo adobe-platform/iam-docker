@@ -6,6 +6,7 @@ import (
 	"github.com/swipely/iam-docker/src/docker"
 	"github.com/swipely/iam-docker/src/http"
 	"github.com/swipely/iam-docker/src/iam"
+	"github.com/swipely/iam-docker/src/msi"
 	"github.com/valyala/fasthttp"
 	"hash/fnv"
 	"net/http/httputil"
@@ -71,6 +72,7 @@ func (app *App) refreshCredentialWorker(credentialStore iam.CredentialStore) {
 	for range timer {
 		wlog.Debug("Refreshing credentials")
 		go credentialStore.RefreshCredentials()
+		go msi.RefreshTokens()
 	}
 }
 
@@ -136,6 +138,20 @@ func (app *App) syncRunningContainers(containerStore docker.ContainerStore, cred
 			logger.WithFields(logrus.Fields{
 				"arn": role,
 			}).Info("Successfully fetched credential")
+		}
+	}
+
+	for _, msiIdentity := range containerStore.MSIIdentities() {
+		_, err := msi.RefreshToken(msi.StorageResource, msiIdentity)
+		if err != nil {
+			logger.WithFields(logrus.Fields{
+				"msiIdentity": msiIdentity,
+				"error":       err.Error(),
+			}).Warn("Unable to fetch msi token")
+		} else {
+			logger.WithFields(logrus.Fields{
+				"msiIdentity": msiIdentity,
+			}).Info("Successfully fetched token")
 		}
 	}
 }
